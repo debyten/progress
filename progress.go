@@ -5,7 +5,10 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"sync"
+	"time"
 )
+
+var defaultDeadline = 1 * time.Minute
 
 type CtxKey int
 
@@ -30,7 +33,7 @@ func (n noop) GetID() string {
 	return ""
 }
 
-func (n noop) StartSignal() chan struct{} {
+func (n noop) WaitForSignal(context.Context, ...func()) error {
 	return nil
 }
 
@@ -40,15 +43,11 @@ func (n noop) Update(_ string, _ ...map[string]any) {
 // Progress represents the state of a long-running operation.
 type Progress interface {
 	GetID() string
-	// StartSignal returns a channel that emits a single value when the first client
-	// connects to this Progress instance.
+	// WaitForSignal blocks until the first client connects or context is canceled.
+	// A deadline must be set on the context, if none is provided, a default timeout of 1 minute will be used.
 	//
-	// This channel can be used to pause execution of a long-running task until a
-	// client connects to monitor its progress. The channel will receive one value
-	// of type struct{} when the first connection is established.
-	//
-	// Returns nil for noop Progress implementations.
-	StartSignal() chan struct{}
+	// An optional cleanup function can be provided to be executed when the context is canceled.
+	WaitForSignal(ctx context.Context, cleanup ...func()) error
 	Update(state string, details ...map[string]any)
 }
 
@@ -60,6 +59,8 @@ type progress struct {
 	started   bool
 	startChan chan struct{}
 	Clients   map[*websocket.Conn]bool
+
+	defaultDeadline time.Duration
 }
 
 // NewProgress initializes a new progress instance.
@@ -69,10 +70,11 @@ func NewProgress() Progress {
 
 func newProgress() *progress {
 	return &progress{
-		ID:        uuid.NewString(),
-		State:     "Pending",
-		Clients:   make(map[*websocket.Conn]bool),
-		startChan: make(chan struct{}, 1),
+		ID:              uuid.NewString(),
+		State:           "Pending",
+		Clients:         make(map[*websocket.Conn]bool),
+		startChan:       make(chan struct{}, 1),
+		defaultDeadline: defaultDeadline,
 	}
 }
 
@@ -80,8 +82,21 @@ func (p *progress) GetID() string {
 	return p.ID
 }
 
-func (p *progress) StartSignal() chan struct{} {
-	return p.startChan
+func (p *progress) WaitForSignal(ctx context.Context, cleanup ...func()) error {
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, p.defaultDeadline)
+		defer cancel()
+	}
+	select {
+	case <-ctx.Done():
+		for _, cleanupFunc := range cleanup {
+			cleanupFunc()
+		}
+		return ctx.Err()
+	case <-p.startChan:
+		return nil
+	}
 }
 
 // Update updates the state and details of the progress and notifies all connected clients.
