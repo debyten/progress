@@ -25,6 +25,15 @@ func NewApi(pm Service) httplayer.Routing {
 	return api{pm: pm}
 }
 
+const secWsProtocolHeader = "Sec-Websocket-Protocol"
+
+func extractWSHeader(r *http.Request) http.Header {
+	sec := r.Header.Get(secWsProtocolHeader)
+	return http.Header{
+		secWsProtocolHeader: []string{sec},
+	}
+}
+
 type api struct {
 	pm Service
 }
@@ -37,8 +46,8 @@ func (a api) Routes(with *httplayer.RoutingDefinition) []httplayer.Route {
 
 func (a api) streamProgress(w http.ResponseWriter, r *http.Request) {
 	id := PathParamFunc(r, "id")
-
-	conn, err := upgrader.Upgrade(w, r, nil)
+	wsHeader := extractWSHeader(r)
+	conn, err := upgrader.Upgrade(w, r, wsHeader)
 	if err != nil {
 		apierr.Handle(err, w)
 		return
